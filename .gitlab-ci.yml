@@ -1,0 +1,75 @@
+stages:
+  - setup
+  - deploy
+  - post_deploy
+
+.install_docker_cli: &install_docker_cli
+  - apt-get update && apt-get install -y apt-transport-https ca-certificates curl gnupg lsb-release
+  - curl -fsSL https://download.docker.com/linux/debian/gpg | apt-key add -
+  - echo "deb [arch=amd64] https://download.docker.com/linux/debian $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+  - apt-get update && apt-get install -y docker-ce-cli
+  - apt-get update && apt-get install -y curl unzip zip
+  - curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+  - unzip awscliv2.zip
+  - ./aws/install
+  - cd ./lib/applications/handlers/
+  - cd ../../../
+  - aws s3 cp ./lib/applications/handlers/pre-processor/pre-processor.py s3://ng-repository-${ENVIRONMENT}/ml/customer-churn/scripts/pre-processor.py
+
+.deploy_job_definition:
+  image: node:18
+  stage: deploy
+  services:
+    - docker:dind
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    NPM_CONFIG_CACHE: .npm
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}-dependencies
+    paths:
+      - node_modules/
+      - .npm/
+  before_script:
+    - *install_docker_cli
+    - npm set //registry.npmjs.org/:_authToken=$NPM_TOKEN
+    - npm ci
+    - npm install -g ts-node tsconfig-paths
+  script:
+    - npm run build
+    # - npm run cdk bootstrap
+    # - npm run cdk synth
+    - npm run cdk deploy "*"
+
+deploy-job-staging:
+  extends: .deploy_job_definition
+  environment:
+    name: staging
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "develop"'
+
+deploy-job-production:
+  extends: .deploy_job_definition
+  environment:
+    name: production
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+.git_config: &git_config
+  - git config --global user.email "ci-automation@ng.cash"
+  - git config --global user.name "CI Automation"
+  - "git remote set-url origin https://oauth2:${PAT_CI_AUTOMATION}@gitlab.com/${CI_PROJECT_PATH}.git"
+
+merge_main_to_develop:
+  stage: post_deploy
+  image:
+    name: alpine/git
+    entrypoint: [""]
+  before_script:
+    - *git_config
+  script:
+    - git fetch origin develop
+    - git checkout develop
+    - git merge origin/main --no-ff --no-edit -m "Merge branch 'main' into 'develop' [skip ci]"
+    - git push origin develop
+  only:
+    - main
